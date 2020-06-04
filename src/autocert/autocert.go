@@ -36,7 +36,8 @@ import (
 )
 
 // DefaultACMEDirectory is the default ACME Directory URL used when the Manager's Client is nil.
-const DefaultACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory"
+const DefaultACMEDirectory = "https://acme-v02.api.letsencrypt.org/directory" 
+// Staging: "https://acme-staging-v02.api.letsencrypt.org/directory"
 
 // createCertRetryAfter is how much time to wait before removing a failed state
 // entry due to an unsuccessful createCert call.
@@ -50,6 +51,11 @@ var pseudoRand *lockedMathRand
 func init() {
 	src := mathrand.NewSource(time.Now().UnixNano())
 	pseudoRand = &lockedMathRand{rnd: mathrand.New(src)}
+}
+
+type DNSHandler interface {
+	PutTXTRecord(ctx context.Context, domain string, value string)
+	DeleteTXTRecord(ctx context.Context, domain string)
 }
 
 // AcceptTOS is a Manager.Prompt function that always returns true to
@@ -183,6 +189,9 @@ type Manager struct {
 	// tryHTTP01 indicates whether the Manager should try "http-01" challenge type
 	// during the authorization flow.
 	tryHTTP01 bool
+	tryDNS01   bool
+
+	dnsHandler DNSHandler
 	// httpTokens contains response body values for http-01 challenges
 	// and is keyed by the URL path at which a challenge response is expected
 	// to be provisioned.
@@ -408,6 +417,14 @@ func (m *Manager) HTTPHandler(fallback http.Handler) http.Handler {
 		}
 		w.Write(data)
 	})
+}
+
+func (m *Manager) DNSHandler(handler DNSHandler) {
+	m.challengeMu.Lock()
+	defer m.challengeMu.Unlock()
+
+	m.tryDNS01 = true
+	m.dnsHandler = handler
 }
 
 func handleHTTPRedirect(w http.ResponseWriter, r *http.Request) {
@@ -807,13 +824,16 @@ AuthorizeOrderLoop:
 			// Respond to the challenge and wait for validation result.
 			cleanup, err := m.fulfill(ctx, client, chal, domain)
 			if err != nil {
+				fmt.Printf("fulfill error: %v\n", err)
 				continue AuthorizeOrderLoop
 			}
 			defer cleanup()
 			if _, err := client.Accept(ctx, chal); err != nil {
+				fmt.Printf("Accept error: %v\n", err)
 				continue AuthorizeOrderLoop
 			}
 			if _, err := client.WaitAuthorization(ctx, z.URI); err != nil {
+				fmt.Printf("WaitAuthorization error: %v\n", err)
 				continue AuthorizeOrderLoop
 			}
 		}
@@ -843,6 +863,9 @@ func (m *Manager) supportedChallengeTypes() []string {
 	typ := []string{"tls-alpn-01"}
 	if m.tryHTTP01 {
 		typ = append(typ, "http-01")
+	}
+	if m.tryDNS01 {
+		typ = append(typ, "dns-01")
 	}
 	return typ
 }
@@ -888,6 +911,13 @@ func (m *Manager) fulfill(ctx context.Context, client *acme.Client, chal *acme.C
 		p := client.HTTP01ChallengePath(chal.Token)
 		m.putHTTPToken(ctx, p, resp)
 		return func() { go m.deleteHTTPToken(p) }, nil
+	case "dns-01":
+		record, err := client.DNS01ChallengeRecord(chal.Token)
+		if err != nil {
+			return nil, err
+		}
+		m.putDNSToken(ctx, domain, record)
+		return func() { go m.deleteDNSToken(ctx, domain) }, nil
 	}
 	return nil, fmt.Errorf("acme/autocert: unknown challenge type %q", chal.Type)
 }
@@ -964,6 +994,17 @@ func (m *Manager) deleteHTTPToken(tokenPath string) {
 // in the Manager's optional Cache.
 func httpTokenCacheKey(tokenPath string) string {
 	return path.Base(tokenPath) + "+http-01"
+}
+
+
+func (m *Manager) putDNSToken(ctx context.Context, domain string, record string) {
+	fullDomain := fmt.Sprintf("_acme-challenge.%s", domain)
+	m.dnsHandler.PutTXTRecord(ctx, fullDomain, record)
+}
+
+func (m *Manager) deleteDNSToken(ctx context.Context, domain string) {
+	fullDomain := fmt.Sprintf("_acme-challenge.%s", domain)
+	m.dnsHandler.DeleteTXTRecord(ctx, fullDomain)
 }
 
 // renew starts a cert renewal timer loop, one per domain.

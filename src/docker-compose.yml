@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: futurice/alley-oop:latest
+    image: sevesalm/alley-oop:latest
     ports:
       - "80:80"
       - "443:443"

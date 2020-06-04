@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"github.com/BurntSushi/toml"
-	"github.com/futurice/alley-oop/src/autocert"
+	"github.com/sevesalm/alley-oop/src/autocert"
 )
 
 func fileExists(fname string) bool {
@@ -63,7 +63,7 @@ func main() {
 		Handler:   handler,
 	}
 
-	fmt.Printf("Starting alley-oop v1.1.2\n")
+	fmt.Printf("Starting alley-oop v2.0.0\n")
 
 	go func() {
 		certHandler := m.HTTPHandler(nil)
